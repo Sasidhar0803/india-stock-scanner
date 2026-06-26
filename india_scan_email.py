@@ -195,10 +195,9 @@ def check_stock(symbol):
             return check_stock_once(symbol)
         except Exception as e:
             if attempt < MAX_RETRIES:
-                time.sleep(2 ** attempt)   # wait 1s, then 2s before retrying
+                time.sleep(2 ** attempt)
             else:
-                print(f"  SKIP {symbol}: {type(e).__name__}: {e}")
-                return None
+                return "ERROR"   # counted in main loop, not silently lost
 
 
 # ------------------------------------------------------------------ #
@@ -270,21 +269,26 @@ tickers = [t for t in tickers if 5 <= len(t) <= 15]
 print(f"Scanning {len(tickers)} NSE stocks...\n")
 
 aligned, fresh = [], []
+errors = 0
 for i, sym in enumerate(tickers, 1):
     result = check_stock(sym)
-    if result:
+    if result == "ERROR":
+        errors += 1
+    elif result:
         aligned.append(result)
-        if result[6]:                           # has flipped SuperTrend(s)
+        if result[6]:
             fresh.append(result)
         tag = "FRESH  " if result[6] else "ALIGNED"
         print(f"{tag}: {result[0]:<12} ₹{result[1]:<8} MCap={result[2]:,.0f}Cr "
               f"SalesG={result[3]}% ProfitG={result[4]}% Flipped={result[6] or '-'}")
     if i % 200 == 0:
-        print(f"  ...{i}/{len(tickers)} scanned, {len(aligned)} matches so far")
+        print(f"  ...{i}/{len(tickers)} scanned | matches={len(aligned)} | errors={errors}")
     time.sleep(DELAY)
 
 elapsed = (time.time() - start) / 60
-print(f"\nDone — ALIGNED: {len(aligned)}  |  FRESH: {len(fresh)}  |  Time: {elapsed:.0f} min")
+print(f"\nDone — ALIGNED: {len(aligned)}  |  FRESH: {len(fresh)}  |  ERRORS: {errors}/{len(tickers)}  |  Time: {elapsed:.0f} min")
+if errors > len(tickers) * 0.3:
+    print("WARNING: >30% of stocks errored — Yahoo Finance is likely rate-limiting this server IP")
 
 # Save CSVs
 cols = ["Symbol", "Price(₹)", "MCap(Cr)", "SalesGrowth%", "ProfitGrowth%", "AvgVol(K)", "Flipped"]
