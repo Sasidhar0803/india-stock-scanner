@@ -8,6 +8,7 @@ Conditions (all must pass):
   4. Market Cap between ₹1,000 Crores and ₹20,000 Crores
   5. Average Volume (last 30 days) > 2,00,000
   6. All 3 SuperTrends (13,4) / (14,5) / (15,6) are GREEN today
+  7. Price is above 200 DEMA (Double EMA) on the day all STs turn green
 
 Two email lists:
   A) ALIGNED - all conditions met
@@ -85,7 +86,11 @@ def supertrend(df, period, multiplier):
     return st
 
 
-def get_row(df, names):
+def dema(series, period):
+    """Double Exponential Moving Average = 2*EMA(n) - EMA(EMA(n))"""
+    ema1 = series.ewm(span=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, adjust=False).mean()
+    return 2 * ema1 - ema2
     for name in names:
         if name in df.index:
             return df.loc[name]
@@ -117,10 +122,10 @@ def check_stock(symbol):
         if sales_growth < 30 or profit_growth < 50:
             return None
 
-        # ---- 3: Price > ₹100 ----
-        hist = t.history(period="6mo")
+        # ---- 3: Price > ₹100  (fetch 2y so 200 DEMA has enough data) ----
+        hist = t.history(period="2y")
         hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
-        if len(hist) < 35:
+        if len(hist) < 250:          # need 250+ days for a reliable 200 DEMA
             return None
 
         price = hist["Close"].iloc[-1]
@@ -153,6 +158,11 @@ def check_stock(symbol):
                 return None
             if price_yday <= st_yday:       # was red yesterday → flip!
                 flipped.append(f"{period},{mult}")
+
+        # ---- 7: Price > 200 DEMA ----
+        dema200 = dema(hist["Close"], 200).iloc[-1]
+        if pd.isna(dema200) or price <= dema200:
+            return None
 
         return (
             symbol.replace(".NS", ""),
@@ -189,7 +199,7 @@ def send_email(aligned, fresh, scanned, elapsed_min):
     body += format_section(fresh,   "B) FRESH  — >=1 SuperTrend flipped to GREEN today") + "\n"
     body += format_section(aligned, "A) ALIGNED — all 3 SuperTrends GREEN today")        + "\n"
     body += f"\nScanned {scanned} NSE stocks in {elapsed_min:.0f} min.\n"
-    body += "Conditions: SalesG>30% | ProfitG>50% | Price>₹100 | MCap ₹1K-20K Cr | AvgVol>2L | All 3 ST Green\n"
+    body += "Conditions: SalesG>30% | ProfitG>50% | Price>₹100 | MCap ₹1K-20K Cr | AvgVol>2L | All 3 ST Green | Price>200 DEMA\n"
 
     msg            = MIMEMultipart()
     msg["From"]    = GMAIL_USER
