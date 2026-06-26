@@ -106,19 +106,37 @@ def check_stock(symbol):
 
         # ---- 1 & 2: Quarterly fundamental growth ----
         q = t.quarterly_income_stmt
-        if q is None or q.empty or q.shape[1] < 5:
+        if q is None or q.empty or q.shape[1] < 2:
             return None
+
+        # Sort columns newest first, ensure they are proper dates
+        q = q.sort_index(axis=1, ascending=False)
+        q.columns = pd.to_datetime(q.columns)
 
         rev = get_row(q, ["Total Revenue", "TotalRevenue"])
         ni  = get_row(q, ["Net Income", "Net Income Common Stockholders", "NetIncome"])
         if rev is None or ni is None:
             return None
 
-        if rev.iloc[4] == 0 or ni.iloc[4] == 0:
+        # Match same quarter last year by actual date (not positional)
+        # to avoid wrong comparisons when yfinance returns extra/missing quarters
+        latest_date  = q.columns[0]
+        one_year_ago = latest_date - pd.DateOffset(years=1)
+        time_diffs   = abs(q.columns - one_year_ago)
+        same_qtr_idx = time_diffs.argmin()
+
+        # Reject if closest match is more than 45 days off (no valid comparison)
+        if time_diffs[same_qtr_idx] > pd.Timedelta(days=45):
             return None
 
-        sales_growth  = (rev.iloc[0] - rev.iloc[4]) / abs(rev.iloc[4]) * 100
-        profit_growth = (ni.iloc[0]  - ni.iloc[4])  / abs(ni.iloc[4])  * 100
+        rev_curr, rev_prev = rev.iloc[0], rev.iloc[same_qtr_idx]
+        ni_curr,  ni_prev  = ni.iloc[0],  ni.iloc[same_qtr_idx]
+
+        if rev_prev == 0 or ni_prev == 0:
+            return None
+
+        sales_growth  = (rev_curr - rev_prev) / abs(rev_prev) * 100
+        profit_growth = (ni_curr  - ni_prev)  / abs(ni_prev)  * 100
         if sales_growth < 30 or profit_growth < 50:
             return None
 
