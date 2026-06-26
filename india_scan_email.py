@@ -43,7 +43,8 @@ MIN_AVG_VOL      = 200_000             # 2 lakh average volume
 CRORE            = 1_00_00_000        # 1 Crore = 10 million
 
 ST_PARAMS        = [(13, 4), (14, 5), (15, 6)]
-DELAY            = 0.4                 # seconds between stocks
+DELAY            = 1.2    # increased from 0.4 — cloud IPs need more breathing room
+MAX_RETRIES      = 2      # retry each stock up to 2 extra times on failure
 
 
 # ------------------------------------------------------------------ #
@@ -98,102 +99,106 @@ def dema(series, period):
 
 
 # ------------------------------------------------------------------ #
-#  Per-stock check                                                     #
+#  Per-stock check (with retry on failure)                             #
 # ------------------------------------------------------------------ #
-def check_stock(symbol):
-    try:
-        t = yf.Ticker(symbol)
+def check_stock_once(symbol):
+    t = yf.Ticker(symbol)
 
-        # ---- 1 & 2: Quarterly fundamental growth ----
-        q = t.quarterly_income_stmt
-        if q is None or q.empty or q.shape[1] < 2:
-            return None
-
-        # Sort columns newest first, ensure they are proper dates
-        q = q.sort_index(axis=1, ascending=False)
-        q.columns = pd.to_datetime(q.columns)
-
-        rev = get_row(q, ["Total Revenue", "TotalRevenue"])
-        ni  = get_row(q, ["Net Income", "Net Income Common Stockholders", "NetIncome"])
-        if rev is None or ni is None:
-            return None
-
-        # Match same quarter last year by actual date (not positional)
-        # to avoid wrong comparisons when yfinance returns extra/missing quarters
-        latest_date  = q.columns[0]
-        one_year_ago = latest_date - pd.DateOffset(years=1)
-        time_diffs   = abs(q.columns - one_year_ago)
-        same_qtr_idx = time_diffs.argmin()
-
-        # Reject if closest match is more than 45 days off (no valid comparison)
-        if time_diffs[same_qtr_idx] > pd.Timedelta(days=45):
-            return None
-
-        rev_curr, rev_prev = rev.iloc[0], rev.iloc[same_qtr_idx]
-        ni_curr,  ni_prev  = ni.iloc[0],  ni.iloc[same_qtr_idx]
-
-        if rev_prev == 0 or ni_prev == 0:
-            return None
-
-        sales_growth  = (rev_curr - rev_prev) / abs(rev_prev) * 100
-        profit_growth = (ni_curr  - ni_prev)  / abs(ni_prev)  * 100
-        if sales_growth < 30 or profit_growth < 50:
-            return None
-
-        # ---- 3: Price > ₹100  (fetch 2y so 200 DEMA has enough data) ----
-        hist = t.history(period="2y")
-        hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
-        if len(hist) < 250:          # need 250+ days for a reliable 200 DEMA
-            return None
-
-        price = hist["Close"].iloc[-1]
-        if price < MIN_PRICE:
-            return None
-
-        # ---- 4: Market Cap ₹1,000 Cr – ₹20,000 Cr ----
-        info   = t.fast_info
-        mcap   = getattr(info, "market_cap", None)
-        if mcap is None or mcap == 0:
-            return None
-        mcap_cr = mcap / CRORE
-        if not (MIN_MCAP_CR <= mcap_cr <= MAX_MCAP_CR):
-            return None
-
-        # ---- 5: Avg Volume (last 30 trading days) > 2,00,000 ----
-        avg_vol = hist["Volume"].tail(30).mean()
-        if avg_vol < MIN_AVG_VOL:
-            return None
-
-        # ---- 6: All 3 SuperTrends green today, track flips ----
-        price_yday = hist["Close"].iloc[-2]
-        flipped    = []
-        for period, mult in ST_PARAMS:
-            st_series          = supertrend(hist, period, mult)
-            st_today, st_yday  = st_series.iloc[-1], st_series.iloc[-2]
-            if pd.isna(st_today) or pd.isna(st_yday):
-                return None
-            if price <= st_today:           # red today → fails
-                return None
-            if price_yday <= st_yday:       # was red yesterday → flip!
-                flipped.append(f"{period},{mult}")
-
-        # ---- 7: Price > 200 DEMA ----
-        dema200 = dema(hist["Close"], 200).iloc[-1]
-        if pd.isna(dema200) or price <= dema200:
-            return None
-
-        return (
-            symbol.replace(".NS", ""),
-            round(price, 2),
-            round(mcap_cr, 0),
-            round(sales_growth, 1),
-            round(profit_growth, 1),
-            round(avg_vol / 1000, 1),       # in thousands for readability
-            ",".join(flipped)
-        )
-
-    except Exception:
+    # ---- 1 & 2: Quarterly fundamental growth ----
+    q = t.quarterly_income_stmt
+    if q is None or q.empty or q.shape[1] < 2:
         return None
+
+    q = q.sort_index(axis=1, ascending=False)
+    q.columns = pd.to_datetime(q.columns)
+
+    rev = get_row(q, ["Total Revenue", "TotalRevenue"])
+    ni  = get_row(q, ["Net Income", "Net Income Common Stockholders", "NetIncome"])
+    if rev is None or ni is None:
+        return None
+
+    latest_date  = q.columns[0]
+    one_year_ago = latest_date - pd.DateOffset(years=1)
+    time_diffs   = abs(q.columns - one_year_ago)
+    same_qtr_idx = time_diffs.argmin()
+
+    if time_diffs[same_qtr_idx] > pd.Timedelta(days=45):
+        return None
+
+    rev_curr, rev_prev = rev.iloc[0], rev.iloc[same_qtr_idx]
+    ni_curr,  ni_prev  = ni.iloc[0],  ni.iloc[same_qtr_idx]
+
+    if rev_prev == 0 or ni_prev == 0:
+        return None
+
+    sales_growth  = (rev_curr - rev_prev) / abs(rev_prev) * 100
+    profit_growth = (ni_curr  - ni_prev)  / abs(ni_prev)  * 100
+    if sales_growth < 30 or profit_growth < 50:
+        return None
+
+    # ---- 3: Price > ₹100  (fetch 2y so 200 DEMA has enough data) ----
+    hist = t.history(period="2y")
+    hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
+    if len(hist) < 250:
+        return None
+
+    price = hist["Close"].iloc[-1]
+    if price < MIN_PRICE:
+        return None
+
+    # ---- 4: Market Cap ₹1,000 Cr – ₹20,000 Cr ----
+    info    = t.fast_info
+    mcap    = getattr(info, "market_cap", None)
+    if mcap is None or mcap == 0:
+        return None
+    mcap_cr = mcap / CRORE
+    if not (MIN_MCAP_CR <= mcap_cr <= MAX_MCAP_CR):
+        return None
+
+    # ---- 5: Avg Volume (last 30 trading days) > 2,00,000 ----
+    avg_vol = hist["Volume"].tail(30).mean()
+    if avg_vol < MIN_AVG_VOL:
+        return None
+
+    # ---- 6: All 3 SuperTrends green today, track flips ----
+    price_yday = hist["Close"].iloc[-2]
+    flipped    = []
+    for period, mult in ST_PARAMS:
+        st_series         = supertrend(hist, period, mult)
+        st_today, st_yday = st_series.iloc[-1], st_series.iloc[-2]
+        if pd.isna(st_today) or pd.isna(st_yday):
+            return None
+        if price <= st_today:
+            return None
+        if price_yday <= st_yday:
+            flipped.append(f"{period},{mult}")
+
+    # ---- 7: Price > 200 DEMA ----
+    dema200 = dema(hist["Close"], 200).iloc[-1]
+    if pd.isna(dema200) or price <= dema200:
+        return None
+
+    return (
+        symbol.replace(".NS", ""),
+        round(price, 2),
+        round(mcap_cr, 0),
+        round(sales_growth, 1),
+        round(profit_growth, 1),
+        round(avg_vol / 1000, 1),
+        ",".join(flipped)
+    )
+
+
+def check_stock(symbol):
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            return check_stock_once(symbol)
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                time.sleep(2 ** attempt)   # wait 1s, then 2s before retrying
+            else:
+                print(f"  SKIP {symbol}: {type(e).__name__}: {e}")
+                return None
 
 
 # ------------------------------------------------------------------ #
