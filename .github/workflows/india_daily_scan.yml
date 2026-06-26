@@ -1,0 +1,22 @@
+name: Daily India Stock Scan
+
+on:
+  schedule:
+    - cron: '30 11 * * 1-5'   # 11:30 AM UTC = 5:00 PM IST, Mon-Fri (after NSE closes at 3:30 PM IST)
+  workflow_dispatch:            # "Run workflow" button for manual/instant runs
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install yfinance pandas requests
+
+      - run: python -u india_scan_email.py
+        env:
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
