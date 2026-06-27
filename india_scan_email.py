@@ -11,9 +11,10 @@ Filters (apply to both lists):
   - Price                       > Rs 50
   - Market Cap                  < Rs 20,000 Cr
 
-Universe: all NSE main-board ("EQ" series) stocks, pulled fresh each run
-from NSE's public equity list (so new listings/delistings are picked up
-automatically - no manually maintained ticker file).
+Universe: all NSE main-board stocks, pulled fresh each run via Yahoo
+Finance's own screener (the same Yahoo infrastructure used for every other
+call in this script) - NSE's website is never contacted directly, so the
+ticker-list fetch isn't subject to NSE's bot-detection / cloud-IP blocking.
 
 Emails both lists when the run finishes. Schedule with Task Scheduler / cron
 / GitHub Actions to run after NSE market close (3:30pm IST) - see chat for
@@ -22,18 +23,12 @@ setup steps.
 FILL IN BEFORE RUNNING (the 3 lines below):
   GMAIL_USER, GMAIL_APP_PASSWORD, TO_EMAIL
 
-REQUIRES: pip install yfinance pandas curl_cffi
-(curl_cffi is required so the NSE ticker-list fetch carries a real Chrome
-TLS fingerprint - NSE silently times out requests from cloud/server IPs
-such as GitHub Actions runners that present a generic Python TLS
-signature; see get_nse_universe() below for details)
+REQUIRES: pip install yfinance pandas
 """
 
 import os
-import io
 import time
 import smtplib
-from curl_cffi import requests as cffi_requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import warnings
@@ -96,53 +91,48 @@ def get_row(df, names):
 
 
 def get_nse_universe():
-    """Pulls the current NSE main-board ('EQ' series) equity list.
-
-    NSE (like many Akamai/Cloudflare-protected sites) fingerprints the TLS
-    handshake itself, not just headers or the HTTP version. Plain `requests`
-    and even `httpx` with HTTP/2 still produce a generic Python TLS
-    signature that gets silently timed out when the connection comes from
-    a datacenter IP (AWS, Azure, GCP - including GitHub Actions runners).
-    curl_cffi reproduces an actual Chrome TLS fingerprint at the C level,
-    which is what lets the same request through from the same IP.
-    Retries a few times since NSE's archive server can also just be slow.
-
-    NOTE: TLS-fingerprint spoofing is the best available fix, but NSE may
-    also score connections by IP reputation alone - if datacenter IPs are
-    blocked outright regardless of fingerprint, this can still fail. If
-    that happens, the realistic options are: (1) keep a periodically
-    refreshed static ticker-list file in the repo instead of fetching live
-    in CI, or (2) run this script on a normal (non-datacenter) machine via
-    Task Scheduler/cron instead of GitHub Actions.
+    """Pulls the NSE main-board equity list via Yahoo Finance's own
+    screener (yf.screen) instead of NSE's website. This goes through the
+    exact same Yahoo Finance infrastructure as every other call in this
+    script, so it's unaffected by NSE's bot-detection / cloud-IP blocking
+    that broke the earlier NSE-website-based approach. Paginates in
+    batches of 250 (Yahoo's per-request max) until exhausted.
     """
-    headers = {
-        "Accept": "text/csv,*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com/",
-    }
-    url = "https://nsearchives.nseindia.com/content/equity_lists/EQUITY_L.csv"
+    query = yf.EquityQuery('and', [
+        yf.EquityQuery('eq', ['region', 'in']),
+        yf.EquityQuery('eq', ['exchange', 'NSI']),  # NSI = Yahoo's code for NSE India
+    ])
 
-    last_err = None
-    for attempt in range(3):
-        try:
-            with cffi_requests.Session(impersonate="chrome124") as client:
-                try:
-                    client.get("https://www.nseindia.com", headers=headers, timeout=20)
-                except Exception:
-                    pass  # cookie warm-up is best-effort
-                resp = client.get(url, headers=headers, timeout=25)
-                resp.raise_for_status()
-                text = resp.text
+    page_size = 250
+    offset = 0
+    tickers = []
 
-            df = pd.read_csv(io.StringIO(text))
-            df.columns = [c.strip() for c in df.columns]
-            df = df[df["SERIES"].str.strip() == "EQ"]
-            return [f"{s.strip()}.NS" for s in df["SYMBOL"].dropna().tolist()]
-        except Exception as e:
-            last_err = e
-            time.sleep(3)
+    while True:
+        result, last_err = None, None
+        for attempt in range(3):
+            try:
+                result = yf.screen(query, offset=offset, size=page_size,
+                                    sortField='ticker', sortAsc=True)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(3)
+        if last_err is not None:
+            raise RuntimeError(f"Could not fetch NSE ticker list via Yahoo screener "
+                                f"(offset={offset}): {last_err}")
 
-    raise RuntimeError(f"Could not fetch NSE ticker list after 3 attempts: {last_err}")
+        quotes = result.get('quotes', []) if result else []
+        for quote in quotes:
+            sym = quote.get('symbol')
+            if sym and quote.get('exchange', '').upper() == 'NSI':
+                tickers.append(sym)
+
+        if len(quotes) < page_size:
+            break
+        offset += page_size
+
+    return sorted(set(tickers))
 
 
 def check_stock(symbol):
