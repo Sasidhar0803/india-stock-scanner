@@ -143,11 +143,23 @@ def check_stock(symbol):
 
         # --- Fundamental filters (cheapest checks first) ---
         q = t.quarterly_income_stmt
-        if q is None or q.empty or q.shape[1] < 5:
+        if q is None or q.empty:
+            return None
+        # Sort columns newest-first so iloc[0]=latest quarter, iloc[4]=same quarter last year.
+        # Yahoo sometimes returns columns out of order or inserts a TTM column, which
+        # would silently shift the index and produce completely wrong YoY comparisons.
+        q = q.sort_index(axis=1, ascending=False)
+        if q.shape[1] < 5:
             return None
         rev = get_row(q, ["Total Revenue", "TotalRevenue"])
         ni = get_row(q, ["Net Income", "Net Income Common Stockholders", "NetIncome"])
         if rev is None or ni is None:
+            return None
+
+        # Drop any NaN at position 0 or 4 to avoid silent wrong comparisons
+        if pd.isna(rev.iloc[0]) or pd.isna(rev.iloc[4]) or rev.iloc[4] == 0:
+            return None
+        if pd.isna(ni.iloc[0]) or pd.isna(ni.iloc[4]) or ni.iloc[4] == 0:
             return None
 
         sales_growth = (rev.iloc[0] - rev.iloc[4]) / abs(rev.iloc[4]) * 100
