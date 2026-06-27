@@ -145,25 +145,43 @@ def check_stock(symbol):
         q = t.quarterly_income_stmt
         if q is None or q.empty:
             return None
-        # Sort columns newest-first so iloc[0]=latest quarter, iloc[4]=same quarter last year.
-        # Yahoo sometimes returns columns out of order or inserts a TTM column, which
-        # would silently shift the index and produce completely wrong YoY comparisons.
-        q = q.sort_index(axis=1, ascending=False)
+
+        # Yahoo's quarterly_income_stmt columns can be out of date order, or include
+        # a non-date TTM column, silently shifting iloc positions and producing wrong
+        # YoY comparisons. Fix: convert all column labels to datetime (drops TTM and
+        # any unparseable labels), then sort newest-first so:
+        #   iloc[0] = most recent quarter
+        #   iloc[4] = same quarter one year ago
+        try:
+            q = q.copy()
+            q.columns = pd.to_datetime(q.columns, errors='coerce')
+            q = q.loc[:, q.columns.notna()]           # drop TTM / unparseable cols
+            q = q.sort_index(axis=1, ascending=False)  # newest quarter first
+        except Exception:
+            return None
+
         if q.shape[1] < 5:
             return None
+
         rev = get_row(q, ["Total Revenue", "TotalRevenue"])
-        ni = get_row(q, ["Net Income", "Net Income Common Stockholders", "NetIncome"])
+        ni  = get_row(q, ["Net Income", "Net Income Common Stockholders", "NetIncome"])
         if rev is None or ni is None:
             return None
 
-        # Drop any NaN at position 0 or 4 to avoid silent wrong comparisons
+        # Guard: base quarter must be non-NaN and non-zero to avoid divide-by-zero
+        # or meaningless growth numbers
         if pd.isna(rev.iloc[0]) or pd.isna(rev.iloc[4]) or rev.iloc[4] == 0:
             return None
         if pd.isna(ni.iloc[0]) or pd.isna(ni.iloc[4]) or ni.iloc[4] == 0:
             return None
 
-        sales_growth = (rev.iloc[0] - rev.iloc[4]) / abs(rev.iloc[4]) * 100
-        profit_growth = (ni.iloc[0] - ni.iloc[4]) / abs(ni.iloc[4]) * 100
+        sales_growth  = (rev.iloc[0] - rev.iloc[4]) / abs(rev.iloc[4]) * 100
+        profit_growth = (ni.iloc[0]  - ni.iloc[4])  / abs(ni.iloc[4])  * 100
+
+        # DEBUG: uncomment 2 lines below for one verification run, then comment out.
+        # q0, q4 = q.columns[0].date(), q.columns[4].date()
+        # print(f"  DBG {symbol}: {q0} vs {q4} | SalesG={round(sales_growth,1)}% ProfitG={round(profit_growth,1)}%")
+
         if sales_growth < 30 or profit_growth < 50:
             return None
 
