@@ -746,9 +746,9 @@ def main() -> None:
     today    = now_ist.date()
 
     # Safety: should be handled by cron, but guard anyway
-    if today.weekday() >= 5:
-        log.info("Weekend (%s) – skipping scan", today.strftime("%A"))
-        return
+    #if today.weekday() >= 5:
+        #log.info("Weekend (%s) – skipping scan", today.strftime("%A"))
+       # return
 
     log.info("=" * 60)
     log.info("NSE Scan  %s  (IST %s)", today, now_ist.strftime("%H:%M"))
