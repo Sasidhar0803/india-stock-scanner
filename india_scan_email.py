@@ -22,17 +22,18 @@ setup steps.
 FILL IN BEFORE RUNNING (the 3 lines below):
   GMAIL_USER, GMAIL_APP_PASSWORD, TO_EMAIL
 
-REQUIRES: pip install yfinance pandas httpx[http2]
-(httpx with the http2 extra is required - NSE blocks plain HTTP/1.1
-requests from cloud/server IPs such as GitHub Actions runners; see
-get_nse_universe() below for details)
+REQUIRES: pip install yfinance pandas curl_cffi
+(curl_cffi is required so the NSE ticker-list fetch carries a real Chrome
+TLS fingerprint - NSE silently times out requests from cloud/server IPs
+such as GitHub Actions runners that present a generic Python TLS
+signature; see get_nse_universe() below for details)
 """
 
 import os
 import io
 import time
 import smtplib
-import httpx
+from curl_cffi import requests as cffi_requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import warnings
@@ -97,19 +98,24 @@ def get_row(df, names):
 def get_nse_universe():
     """Pulls the current NSE main-board ('EQ' series) equity list.
 
-    NSE silently times out plain HTTP/1.1 requests (what the `requests`
-    library speaks) when they come from datacenter/cloud IPs - AWS, Azure,
-    GCP, and that includes GitHub Actions runners - but is fine with the
-    exact same request over HTTP/2. httpx with http2=True speaks HTTP/2,
-    which is what makes this work in CI. A plain `requests` session works
-    fine from a home network, which is why this can look "correct" when
-    tested locally but still time out once it's running in GitHub Actions.
+    NSE (like many Akamai/Cloudflare-protected sites) fingerprints the TLS
+    handshake itself, not just headers or the HTTP version. Plain `requests`
+    and even `httpx` with HTTP/2 still produce a generic Python TLS
+    signature that gets silently timed out when the connection comes from
+    a datacenter IP (AWS, Azure, GCP - including GitHub Actions runners).
+    curl_cffi reproduces an actual Chrome TLS fingerprint at the C level,
+    which is what lets the same request through from the same IP.
     Retries a few times since NSE's archive server can also just be slow.
+
+    NOTE: TLS-fingerprint spoofing is the best available fix, but NSE may
+    also score connections by IP reputation alone - if datacenter IPs are
+    blocked outright regardless of fingerprint, this can still fail. If
+    that happens, the realistic options are: (1) keep a periodically
+    refreshed static ticker-list file in the repo instead of fetching live
+    in CI, or (2) run this script on a normal (non-datacenter) machine via
+    Task Scheduler/cron instead of GitHub Actions.
     """
     headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0 Safari/537.36"),
         "Accept": "text/csv,*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.nseindia.com/",
@@ -119,13 +125,12 @@ def get_nse_universe():
     last_err = None
     for attempt in range(3):
         try:
-            with httpx.Client(http2=True, headers=headers, timeout=25,
-                               follow_redirects=True) as client:
+            with cffi_requests.Session(impersonate="chrome124") as client:
                 try:
-                    client.get("https://www.nseindia.com")  # warm up cookies, best-effort
+                    client.get("https://www.nseindia.com", headers=headers, timeout=20)
                 except Exception:
-                    pass
-                resp = client.get(url)
+                    pass  # cookie warm-up is best-effort
+                resp = client.get(url, headers=headers, timeout=25)
                 resp.raise_for_status()
                 text = resp.text
 
