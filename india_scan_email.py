@@ -664,11 +664,11 @@ def send_email(
     total_scanned: int,
     to_addr: str,
 ) -> None:
-    smtp_host  = os.environ["SMTP_HOST"]
-    smtp_port  = int(os.environ.get("SMTP_PORT", 587))
-    smtp_user  = os.environ["SMTP_USER"]
-    smtp_pass  = os.environ["SMTP_PASS"]
-    from_addr  = os.environ.get("FROM_EMAIL", smtp_user)
+    smtp_host = "smtp.gmail.com"
+    smtp_port = 587
+    smtp_user = "tomailsasidhar@gmail.com"     # <-- Your Gmail address
+    smtp_pass = os.environ["GMAIL_APP_PASSWORD"]
+    from_addr = smtp_user
 
     now_ist    = datetime.now(IST)
     today_str  = now_ist.strftime("%d %b %Y")
