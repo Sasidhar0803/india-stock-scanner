@@ -21,13 +21,18 @@ setup steps.
 
 FILL IN BEFORE RUNNING (the 3 lines below):
   GMAIL_USER, GMAIL_APP_PASSWORD, TO_EMAIL
+
+REQUIRES: pip install yfinance pandas httpx[http2]
+(httpx with the http2 extra is required - NSE blocks plain HTTP/1.1
+requests from cloud/server IPs such as GitHub Actions runners; see
+get_nse_universe() below for details)
 """
 
 import os
 import io
 import time
 import smtplib
-import requests
+import httpx
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import warnings
@@ -92,27 +97,47 @@ def get_row(df, names):
 def get_nse_universe():
     """Pulls the current NSE main-board ('EQ' series) equity list.
 
-    NSE's site blocks plain requests without cookies, so we hit the
-    homepage first to pick up a session cookie, then fetch the CSV.
+    NSE silently times out plain HTTP/1.1 requests (what the `requests`
+    library speaks) when they come from datacenter/cloud IPs - AWS, Azure,
+    GCP, and that includes GitHub Actions runners - but is fine with the
+    exact same request over HTTP/2. httpx with http2=True speaks HTTP/2,
+    which is what makes this work in CI. A plain `requests` session works
+    fine from a home network, which is why this can look "correct" when
+    tested locally but still time out once it's running in GitHub Actions.
+    Retries a few times since NSE's archive server can also just be slow.
     """
-    session = requests.Session()
-    session.headers.update({
+    headers = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/124.0 Safari/537.36"),
+        "Accept": "text/csv,*/*",
         "Accept-Language": "en-US,en;q=0.9",
-    })
-    session.get("https://www.nseindia.com", timeout=10)  # warm up cookies
-
+        "Referer": "https://www.nseindia.com/",
+    }
     url = "https://nsearchives.nseindia.com/content/equity_lists/EQUITY_L.csv"
-    resp = session.get(url, timeout=15)
-    resp.raise_for_status()
 
-    df = pd.read_csv(io.StringIO(resp.text))
-    df.columns = [c.strip() for c in df.columns]
-    df = df[df["SERIES"].str.strip() == "EQ"]
-    tickers = [f"{s.strip()}.NS" for s in df["SYMBOL"].dropna().tolist()]
-    return tickers
+    last_err = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(http2=True, headers=headers, timeout=25,
+                               follow_redirects=True) as client:
+                try:
+                    client.get("https://www.nseindia.com")  # warm up cookies, best-effort
+                except Exception:
+                    pass
+                resp = client.get(url)
+                resp.raise_for_status()
+                text = resp.text
+
+            df = pd.read_csv(io.StringIO(text))
+            df.columns = [c.strip() for c in df.columns]
+            df = df[df["SERIES"].str.strip() == "EQ"]
+            return [f"{s.strip()}.NS" for s in df["SYMBOL"].dropna().tolist()]
+        except Exception as e:
+            last_err = e
+            time.sleep(3)
+
+    raise RuntimeError(f"Could not fetch NSE ticker list after 3 attempts: {last_err}")
 
 
 def check_stock(symbol):
@@ -199,7 +224,26 @@ def send_email(aligned, fresh, scanned, elapsed_min):
 # ---- Main ----
 start = time.time()
 print("Loading NSE ticker list...")
-tickers = get_nse_universe()
+try:
+    tickers = get_nse_universe()
+except Exception as e:
+    print(f"FAILED to load NSE ticker list: {e}")
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = GMAIL_USER
+        msg["To"] = TO_EMAIL
+        msg["Subject"] = "India Stock Scan: FAILED to fetch ticker list"
+        msg.attach(MIMEText(f"Could not fetch the NSE ticker list, so today's scan "
+                             f"did not run.\n\nError:\n{e}", "plain"))
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+        print("Failure notification emailed.")
+    except Exception as mail_err:
+        print(f"Also failed to send failure email: {mail_err}")
+    raise
+
 print(f"Scanning {len(tickers)} stocks...\n")
 
 aligned, fresh = [], []
