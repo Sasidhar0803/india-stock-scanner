@@ -2,7 +2,8 @@ name: Daily India Stock Scan
 
 on:
   schedule:
-    - cron: '30 11 * * 1-5'   # 5:00 PM IST, Mon-Fri
+    # 5:00 PM IST (11:30 UTC), Monday-Friday
+    - cron: '30 11 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -10,16 +11,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run Scanner
-        run: python -u india_scan_email.py
+      - name: Run NSE Scanner
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python -u india_scan_email.py
