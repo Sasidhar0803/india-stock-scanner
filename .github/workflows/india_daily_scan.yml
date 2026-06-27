@@ -12,6 +12,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install yfinance pandas requests
-      - run: python daily_scan_email.py
+      - run: python india_scan_email.py
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
