@@ -8,8 +8,9 @@ Produces two lists (same fundamentals + price/market-cap filters for both):
 Filters (apply to both lists):
   - Quarterly Revenue growth    > 30%      vs same quarter last year
   - Quarterly Net Income growth > 50%      vs same quarter last year
-  - Price                       > Rs 50
+  - Price                       > Rs 100
   - Market Cap                  < Rs 20,000 Cr
+  - Avg Volume (last 30 days)   > 200,000
 
 Universe: all NSE main-board stocks, pulled fresh each run via Yahoo
 Finance's own screener (the same Yahoo infrastructure used for every other
@@ -45,7 +46,8 @@ TO_EMAIL = "tomailsasidhar@gmail.com"     # results go here
 ST_PARAMS = [(13, 4), (14, 5), (15, 6)]
 DELAY = 0.3
 
-MIN_PRICE = 50          # Rs - same numeric floor as the US version, now in rupees
+MIN_PRICE = 100         # Rs - stocks with price ABOVE this pass
+MIN_VOL_30 = 200000     # avg volume over last 30 days must exceed this
 MAX_MCAP_CR = 20000     # Rs Cr - stocks with market cap BELOW this pass
 CR = 1e7                # 1 crore = 10,000,000 rupees
 
@@ -158,7 +160,7 @@ def check_stock(symbol):
         if not mcap or mcap >= MAX_MCAP_CR * CR:
             return None
 
-        # --- Price + SuperTrend filters ---
+        # --- Price + Volume + SuperTrend filters ---
         hist = t.history(period="6mo")
         hist = hist.dropna(subset=["Close", "High", "Low"])
         if len(hist) < 30:
@@ -166,6 +168,10 @@ def check_stock(symbol):
 
         price = hist["Close"].iloc[-1]
         if price <= MIN_PRICE:
+            return None
+
+        avg_vol_30 = hist["Volume"].iloc[-30:].mean()
+        if avg_vol_30 <= MIN_VOL_30:
             return None
 
         price_yday = hist["Close"].iloc[-2]
